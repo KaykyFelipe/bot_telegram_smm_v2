@@ -1,0 +1,17 @@
+# Bot Telegram SMM - Dependências Python
+# Instalar com: pip install -r requirements.txt
+
+# Telegram Bot API
+python-telegram-bot[job-queue]==20.7
+
+# OCR e Processamento de Imagens
+pytesseract==0.3.10
+numpy<2
+opencv-python>=4.8.1.78
+Pillow>=11.0.0
+
+# Requisições HTTP
+requests==2.31.0
+
+# Variáveis de ambiente
+python-dotenv==1.0.0

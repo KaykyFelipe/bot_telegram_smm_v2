@@ -1,0 +1,85 @@
+# ==========================================
+# Bot Telegram SMM - .gitignore
+# ==========================================
+
+# Ambiente virtual Python
+venv/
+env/
+.venv/
+ENV/
+
+# Arquivos de configuração sensíveis
+.env
+*.env.local
+
+# Banco de dados
+data/*.db
+data/*.db-journal
+*.sqlite
+*.sqlite3
+
+# Logs
+data/*.log
+*.log
+logs/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Sistema operacional
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Arquivos temporários
+*.tmp
+*.temp
+*.bak
+
+# Imagens de comprovantes (se salvos localmente)
+comprovantes/
+uploads/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# MyPy
+.mypy_cache/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
