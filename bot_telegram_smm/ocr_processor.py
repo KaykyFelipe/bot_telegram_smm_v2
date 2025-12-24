@@ -401,14 +401,9 @@ class OCRProcessor:
                 resultado['detalhes']['duplicata'] = True
                 resultado['detalhes']['uso_anterior'] = uso_anterior
                 
-                # Registrar tentativa de fraude
-                database.registrar_log(
-                    'fraude_detectada',
-                    pedido['id'],
-                    pedido['chat_id'],
-                    'Tentativa de uso de comprovante duplicado',
-                    {'hash': hash_comprovante, 'uso_anterior': uso_anterior.get('pedido_id')}
-                )
+                # Log de tentativa de fraude
+                logger.warning(f"Fraude detectada: comprovante duplicado para pedido {pedido['id']}")
+
                 
                 return resultado
             

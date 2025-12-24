@@ -339,7 +339,7 @@ async def mostrar_categorias(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     
     try:
-        # Obter categorias
+        # Obter categorias que realmente têm serviços
         categorias = obter_categorias_disponiveis()
         
         if not categorias:
@@ -348,11 +348,20 @@ async def mostrar_categorias(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return MENU_PRINCIPAL
         
-        # Criar botões de categorias
+        # Criar botões apenas para categorias com serviços
         keyboard = []
         for cat in categorias:
-            emoji_cat = config.CATEGORIAS.get(cat, f"📦 {cat.title()}")
-            keyboard.append([InlineKeyboardButton(emoji_cat, callback_data=f"cat_{cat}")])
+            # Verificar se a categoria tem serviços
+            servicos_cat = obter_servicos_por_categoria(cat)
+            if servicos_cat:
+                emoji_cat = config.CATEGORIAS.get(cat, f"📦 {cat.title()}")
+                keyboard.append([InlineKeyboardButton(f"{emoji_cat} ({len(servicos_cat)})", callback_data=f"cat_{cat}")])
+        
+        if not keyboard:
+            await query.edit_message_text(
+                "❌ Nenhum serviço disponível no momento. Tente novamente mais tarde."
+            )
+            return MENU_PRINCIPAL
         
         keyboard.append([InlineKeyboardButton("⬅️ Voltar", callback_data="voltar_menu")])
         
@@ -445,17 +454,40 @@ async def callback_selecionar_servico(update: Update, context: ContextTypes.DEFA
         # Salvar serviço selecionado
         context.user_data['servico'] = servico
         
-        # Solicitar link
-        mensagem = """
-🔗 <b>Envie o link</b>
+        # Responder ao callback
+        await query.answer()
+        
+        # Editar mensagem anterior
+        await query.edit_message_text(
+            "✅ Serviço selecionado! Agora envie o link.",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Solicitar link em uma nova mensagem
+        categoria = servico.get('categoria', servico.get('category', 'instagram'))
+        exemplo_links = {
+            'instagram': 'https://instagram.com/seu_usuario',
+            'tiktok': 'https://www.tiktok.com/@seu_usuario',
+            'youtube': 'https://www.youtube.com/@seu_canal',
+            'facebook': 'https://www.facebook.com/seu_perfil',
+            'twitter': 'https://twitter.com/seu_usuario',
+        }
+        exemplo = exemplo_links.get(categoria, 'https://instagram.com/seu_usuario')
+        
+        mensagem = f"""🔗 <b>Envie o link do perfil/post</b>
 
-Por favor, envie o link do perfil/post onde deseja aplicar o serviço:
+Por favor, copie e cole o link onde deseja aplicar o serviço:
+
+📌 <b>Exemplo:</b>
+<code>{exemplo}</code>
 
 ⚠️ <b>Atenção:</b>
-• O perfil deve estar público
-• Verifique se o link está correto
+• O perfil deve estar PUBLICO
+• Copie o link completo da barra de endereço
+• Nao use links encurtados
 """
-        await query.edit_message_text(mensagem, parse_mode=ParseMode.HTML)
+        
+        await query.message.reply_text(mensagem, parse_mode=ParseMode.HTML)
         
         return INSERIR_LINK
     
@@ -519,67 +551,110 @@ Quantos {tipo} você deseja?
 
 async def receber_quantidade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handler para receber a quantidade do usuário."""
-    quantidade_texto = update.message.text.strip()
-    servico = context.user_data.get('servico')
-    link = context.user_data.get('link')
-    
-    if not servico or not link:
-        await update.message.reply_text("❌ Erro: dados incompletos. Use /start para recomeçar.")
-        return ConversationHandler.END
-    
-    minimo = servico.get('min', 100)
-    maximo = servico.get('max', 10000)
-    
-    # Validar quantidade
-    valido, quantidade, erro = utils.validar_quantidade(quantidade_texto, minimo, maximo)
-    
-    if not valido:
-        await update.message.reply_text(f"❌ {erro}\n\nEnvie uma quantidade válida:")
-        return INSERIR_QUANTIDADE
-    
-    # Verificar limite de pedidos por hora
-    chat_id = update.effective_chat.id
-    pedidos_recentes = database.contar_pedidos_recentes(chat_id)
-    
-    if pedidos_recentes >= config.MAX_PEDIDOS_POR_HORA:
-        await update.message.reply_text(
-            f"⚠️ Você atingiu o limite de {config.MAX_PEDIDOS_POR_HORA} pedidos por hora.\n"
-            "Aguarde um pouco antes de fazer novos pedidos."
+    try:
+        quantidade_texto = update.message.text.strip()
+        chat_id = update.effective_chat.id
+        
+        logger.info(f"[{chat_id}] Recebido quantidade: {quantidade_texto}")
+        logger.debug(f"[{chat_id}] user_data keys: {list(context.user_data.keys())}")
+        
+        # Obter dados da sessão
+        servico = context.user_data.get('servico')
+        link = context.user_data.get('link')
+        
+        # Validar dados
+        if not servico:
+            logger.error(f"[{chat_id}] Serviço não encontrado em user_data")
+            await update.message.reply_text(
+                "❌ <b>Erro:</b> Serviço não selecionado.\n\n"
+                "Use /start para recomeçar o processo.",
+                parse_mode=ParseMode.HTML
+            )
+            return ConversationHandler.END
+        
+        if not link:
+            logger.error(f"[{chat_id}] Link não encontrado em user_data")
+            await update.message.reply_text(
+                "❌ <b>Erro:</b> Link não fornecido.\n\n"
+                "Use /start para recomeçar o processo.",
+                parse_mode=ParseMode.HTML
+            )
+            return ConversationHandler.END
+        
+        # Obter limites
+        minimo = servico.get('min', 100)
+        maximo = servico.get('max', 10000)
+        
+        logger.debug(f"[{chat_id}] Validando: '{quantidade_texto}' (min: {minimo}, max: {maximo})")
+        
+        # Validar quantidade
+        valido, quantidade, erro = utils.validar_quantidade(quantidade_texto, minimo, maximo)
+        
+        if not valido:
+            logger.warning(f"[{chat_id}] Quantidade inválida: {erro}")
+            await update.message.reply_text(
+                f"❌ <b>Quantidade Inválida</b>\n\n"
+                f"{erro}\n\n"
+                f"📊 <b>Limites:</b>\n"
+                f"• Mínimo: {utils.formatar_numero(minimo)}\n"
+                f"• Máximo: {utils.formatar_numero(maximo)}\n\n"
+                f"Por favor, envie um número válido:",
+                parse_mode=ParseMode.HTML
+            )
+            return INSERIR_QUANTIDADE
+        
+        logger.info(f"[{chat_id}] Quantidade válida: {quantidade}")
+        
+        # Verificar limite de pedidos por hora
+        pedidos_recentes = database.contar_pedidos_recentes(chat_id)
+        
+        if pedidos_recentes >= config.MAX_PEDIDOS_POR_HORA:
+            logger.warning(f"[{chat_id}] Limite de pedidos por hora excedido")
+            await update.message.reply_text(
+                f"⚠️ <b>Limite Atingido</b>\n\n"
+                f"Você já fez {pedidos_recentes} pedidos nesta hora.\n"
+                f"Limite: {config.MAX_PEDIDOS_POR_HORA} pedidos/hora\n\n"
+                f"Aguarde um pouco antes de fazer novos pedidos.",
+                parse_mode=ParseMode.HTML
+            )
+            return ConversationHandler.END
+        
+        # Calcular preços
+        rate_api = float(servico.get('rate', 0))
+        preco_api, preco_final, margem = pricing.calcular_preco_por_quantidade(rate_api, quantidade)
+        
+        logger.info(f"[{chat_id}] Preços calculados: API={preco_api:.2f}, Final={preco_final:.2f}, Margem={margem:.2f}")
+        
+        # Gerar ID do pedido
+        pedido_id = utils.gerar_id_pedido()
+        
+        # Criar pedido no banco
+        database.criar_pedido(
+            pedido_id=pedido_id,
+            chat_id=chat_id,
+            username=update.effective_user.username or '',
+            service_id=servico.get('service_id', servico.get('service')),
+            servico_nome=servico.get('nome', servico.get('name', 'Serviço')),
+            categoria=servico.get('categoria', servico.get('category', '')),
+            link=link,
+            quantidade=quantidade,
+            preco_api=preco_api,
+            valor_final=preco_final,
+            margem_lucro=margem
         )
-        return ConversationHandler.END
-    
-    # Calcular preços
-    rate_api = float(servico.get('rate', 0))
-    preco_api, preco_final, margem = pricing.calcular_preco_por_quantidade(rate_api, quantidade)
-    
-    # Gerar ID do pedido
-    pedido_id = utils.gerar_id_pedido()
-    
-    # Criar pedido no banco
-    database.criar_pedido(
-        pedido_id=pedido_id,
-        chat_id=chat_id,
-        username=update.effective_user.username or '',
-        service_id=servico.get('service_id', servico.get('service')),
-        servico_nome=servico.get('nome', servico.get('name', 'Serviço')),
-        categoria=servico.get('categoria', servico.get('category', '')),
-        link=link,
-        quantidade=quantidade,
-        preco_api=preco_api,
-        valor_final=preco_final,
-        margem_lucro=margem
-    )
-    
-    # Salvar pedido na sessão
-    context.user_data['pedido_id'] = pedido_id
-    context.user_data['valor_final'] = preco_final
-    
-    # Obter nome do serviço de forma segura
-    servico_nome = escape_html(servico.get('nome', servico.get('name', 'Serviço')))
-    link_truncado = escape_html(utils.truncar_link(link))
-    
-    # Exibir resumo do pedido
-    mensagem = f"""
+        
+        logger.info(f"[{chat_id}] Pedido criado no banco: {pedido_id}")
+        
+        # Salvar pedido na sessão
+        context.user_data['pedido_id'] = pedido_id
+        context.user_data['valor_final'] = preco_final
+        
+        # Obter nome do serviço de forma segura
+        servico_nome = escape_html(servico.get('nome', servico.get('name', 'Serviço')))
+        link_truncado = escape_html(utils.truncar_link(link))
+        
+        # Exibir resumo do pedido
+        mensagem = f"""
 📋 <b>RESUMO DO PEDIDO</b>
 
 🆔 Pedido: <code>{pedido_id}</code>
@@ -604,10 +679,22 @@ async def receber_quantidade(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 ⏰ Você tem <b>1 hora</b> para efetuar o pagamento.
 """
-    
-    await update.message.reply_text(mensagem, parse_mode=ParseMode.HTML)
-    
-    return AGUARDANDO_COMPROVANTE
+        
+        await update.message.reply_text(mensagem, parse_mode=ParseMode.HTML)
+        
+        logger.info(f"[{chat_id}] Resumo do pedido enviado. Aguardando comprovante.")
+        
+        return AGUARDANDO_COMPROVANTE
+        
+    except Exception as e:
+        logger.error(f"[{chat_id}] Erro em receber_quantidade: {e}", exc_info=True)
+        await update.message.reply_text(
+            "❌ <b>Erro ao processar quantidade</b>\n\n"
+            "Ocorreu um erro inesperado. Use /start para recomeçar.",
+            parse_mode=ParseMode.HTML
+        )
+        return ConversationHandler.END
+
 
 
 async def receber_comprovante(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -706,13 +793,9 @@ async def receber_comprovante(update: Update, context: ContextTypes.DEFAULT_TYPE
                 parse_mode=ParseMode.HTML
             )
             
-            # Registrar log
-            database.registrar_log(
-                'comprovante_rejeitado',
-                pedido_id,
-                chat_id,
-                resultado['motivo']
-            )
+            # Log simplificado
+            logger.warning(f"Comprovante rejeitado para {pedido_id}: {resultado['motivo']}")
+
             
             if tentativas_restantes <= 0:
                 database.atualizar_status_pedido(pedido_id, 'cancelado', motivo_rejeicao='Comprovantes inválidos')
@@ -1205,6 +1288,30 @@ async def verificar_pedidos_expirados(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ==========================================
+# HANDLERS DE TEXTO PARA ESTADOS
+# ==========================================
+
+async def handler_texto_comprovante(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handler para mensagens de texto no estado AGUARDANDO_COMPROVANTE."""
+    await update.message.reply_text(
+        "📸 <b>Por favor, envie uma FOTO do comprovante PIX.</b>\n\n"
+        "Clique no ícone de clipe/anexo e selecione a imagem do seu comprovante.",
+        parse_mode=ParseMode.HTML
+    )
+    return AGUARDANDO_COMPROVANTE
+
+
+async def handler_texto_aprovacao(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handler para mensagens de texto no estado AGUARDANDO_APROVACAO."""
+    await update.message.reply_text(
+        "⏳ <b>Seu comprovante está em análise.</b>\n\n"
+        "Nossa equipe está verificando. Você será notificado em breve!",
+        parse_mode=ParseMode.HTML
+    )
+    return AGUARDANDO_APROVACAO
+
+
+# ==========================================
 # FUNÇÃO PRINCIPAL
 # ==========================================
 
@@ -1242,14 +1349,10 @@ def main():
             ],
             AGUARDANDO_COMPROVANTE: [
                 MessageHandler(filters.PHOTO, receber_comprovante),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: u.message.reply_text(
-                    "📸 Por favor, envie uma <b>foto</b> do comprovante.", parse_mode=ParseMode.HTML
-                ))
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handler_texto_comprovante)
             ],
             AGUARDANDO_APROVACAO: [
-                MessageHandler(filters.ALL, lambda u, c: u.message.reply_text(
-                    "⏳ Seu comprovante está em análise. Aguarde..."
-                ))
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handler_texto_aprovacao)
             ]
         },
         fallbacks=[
