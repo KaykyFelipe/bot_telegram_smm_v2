@@ -30,17 +30,44 @@ def get_connection():
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM usuarios")
     """
-    conn = sqlite3.connect(config.DATABASE_PATH)
+    conn = sqlite3.connect(config.DATABASE_PATH, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row  # Permite acessar colunas por nome
+    
+    # Ativar WAL mode para melhor concorrência
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA busy_timeout=30000')  # 30 segundos
+        conn.execute('PRAGMA synchronous=NORMAL')
+    except Exception as e:
+        logger.warning(f"Não foi possível ativar WAL mode: {e}")
+    
     try:
         yield conn
         conn.commit()
+    except sqlite3.OperationalError as e:
+        if 'database is locked' in str(e):
+            logger.warning(f"Banco de dados travado, ignorando erro")
+            try:
+                conn.rollback()
+            except:
+                pass
+        else:
+            try:
+                conn.rollback()
+            except:
+                pass
+            logger.error(f"Erro no banco de dados: {e}")
     except Exception as e:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except:
+            pass
         logger.error(f"Erro no banco de dados: {e}")
-        raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except:
+            pass
 
 
 def inicializar_banco():
@@ -297,8 +324,8 @@ def criar_pedido(
             link, quantidade, preco_api, valor_final, margem_lucro
         ))
         
-        registrar_log('pedido_criado', pedido_id, chat_id, f"Pedido criado: {servico_nome}")
-        logger.info(f"Pedido criado: {pedido_id} para usuário {chat_id}")
+        # Log simplificado para evitar travamento do banco
+        logger.info(f"Pedido criado: {pedido_id} para usuário {chat_id} - {servico_nome}")
         return pedido_id
 
 
@@ -404,7 +431,6 @@ def atualizar_status_pedido(
         query = f"UPDATE pedidos SET {', '.join(updates)} WHERE id = ?"
         cursor.execute(query, params)
         
-        registrar_log('status_atualizado', pedido_id, None, f"Status: {status}")
         logger.info(f"Pedido {pedido_id} atualizado para status: {status}")
 
 

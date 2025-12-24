@@ -1,6 +1,9 @@
 """
 Cliente da API BaratoInsta
 Gerencia todas as interações com a API de serviços SMM.
+
+ATUALIZADO: Categorização automática baseada no nome do serviço,
+já que a API retorna todos os serviços em uma única categoria genérica.
 """
 
 import logging
@@ -15,40 +18,82 @@ import database
 logger = logging.getLogger(__name__)
 
 
+class APIError(Exception):
+    """
+    Exceção para erros da API.
+    
+    Attributes:
+        message: Mensagem de erro
+    """
+    
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(self.message)
+
+
+def _detectar_categoria_por_nome(nome_servico: str) -> str:
+    """
+    Detecta a categoria do serviço baseado no nome.
+    
+    A API BaratoInsta retorna todos os serviços em uma categoria genérica,
+    então precisamos categorizar manualmente pelo nome.
+    
+    Args:
+        nome_servico: Nome do serviço retornado pela API
+        
+    Returns:
+        str: Categoria detectada (instagram, tiktok, youtube, etc.)
+    """
+    nome_lower = nome_servico.lower()
+    
+    # Padrões de detecção por rede social (ordem de prioridade)
+    padroes = {
+        'tiktok': ['tiktok', 'tik tok', 'tiktoker'],
+        'youtube': ['youtube', 'youtuber', 'shorts youtube', 'inscrit'],
+        'twitter': ['twitter', 'tweet', 'x.com', 'retweet'],
+        'facebook': ['facebook', 'fanpage', 'fb '],
+        'telegram': ['telegram', 'canal telegram', 'grupo telegram'],
+        'spotify': ['spotify', 'playlist spotify', 'ouvintes spotify'],
+        'twitch': ['twitch', 'streamer twitch'],
+        'kwai': ['kwai'],
+        'linkedin': ['linkedin', 'linked in'],
+        'instagram': [
+            'insta', 'instagram', 'reels', 'igtv', 
+            'stories', 'story', 'direct', 'ig '
+        ],
+    }
+    
+    # Verificar cada padrão
+    for categoria, keywords in padroes.items():
+        for keyword in keywords:
+            if keyword in nome_lower:
+                return categoria
+    
+    # Se não detectar, verificar palavras genéricas que indicam Instagram
+    palavras_instagram = ['seguidor', 'curtida', 'like', 'visualiza', 'comentário']
+    for palavra in palavras_instagram:
+        if palavra in nome_lower:
+            return 'instagram'
+    
+    return 'outros'
+
+
 class BaratoInstaAPI:
     """
     Cliente para interação com a API do BaratoInsta.
-    
-    A API utiliza o padrão comum de APIs SMM Panel com as seguintes ações:
-    - services: Lista todos os serviços disponíveis
-    - add: Cria um novo pedido
-    - status: Consulta o status de um pedido
-    - balance: Consulta o saldo da conta
-    
-    Example:
-        >>> api = BaratoInstaAPI()
-        >>> servicos = api.listar_servicos()
-        >>> pedido = api.criar_pedido(service_id=1, link='https://...', quantidade=1000)
     """
     
     def __init__(self):
         """Inicializa o cliente da API."""
         self.api_url = config.API_URL
         self.api_key = config.API_KEY_BARATOINSTA
-        self.timeout = 30  # segundos
+        self.timeout = 30
+        self._cache_servicos = []
+        self._cache_timestamp = 0
         
     def _fazer_requisicao(self, dados: Dict[str, Any]) -> Dict[str, Any]:
         """
         Faz uma requisição à API.
-        
-        Args:
-            dados: Dados a serem enviados na requisição
-            
-        Returns:
-            Dict com a resposta da API
-            
-        Raises:
-            APIError: Se houver erro na requisição
         """
         dados['key'] = self.api_key
         
@@ -63,7 +108,7 @@ class BaratoInstaAPI:
             response.raise_for_status()
             
             resultado = response.json()
-            logger.debug(f"Resposta API: {resultado}")
+            logger.debug(f"Resposta API: {type(resultado)}")
             
             # Verificar erro na resposta
             if isinstance(resultado, dict) and resultado.get('error'):
@@ -86,25 +131,15 @@ class BaratoInstaAPI:
     def listar_servicos(self, usar_cache: bool = True) -> List[Dict[str, Any]]:
         """
         Lista todos os serviços disponíveis na API.
-        
-        Args:
-            usar_cache: Se True, tenta usar o cache antes de consultar a API
-            
-        Returns:
-            Lista de serviços disponíveis
-            
-        Example:
-            >>> api = BaratoInstaAPI()
-            >>> servicos = api.listar_servicos()
-            >>> print(servicos[0])
-            {'service': 1, 'name': 'Seguidores Instagram', 'rate': 10.00, ...}
         """
-        # Tentar usar cache
-        if usar_cache:
-            servicos_cache = database.obter_servicos_cache()
-            if servicos_cache:
-                logger.info(f"Usando cache: {len(servicos_cache)} serviços")
-                return servicos_cache
+        import time
+        
+        # Verificar cache em memória
+        if usar_cache and self._cache_servicos:
+            idade_cache = time.time() - self._cache_timestamp
+            if idade_cache < config.CACHE_SERVICOS_TTL:
+                logger.debug(f"Usando cache de memória ({len(self._cache_servicos)} serviços)")
+                return self._cache_servicos
         
         # Buscar da API
         try:
@@ -115,48 +150,60 @@ class BaratoInstaAPI:
             else:
                 servicos = resultado.get('services', [])
             
-            # Categorizar serviços
+            # Categorizar serviços pelo nome
             servicos_categorizados = self._categorizar_servicos(servicos)
             
-            # Salvar no cache
-            database.salvar_servicos_cache(servicos_categorizados)
+            # Salvar no cache de memória
+            self._cache_servicos = servicos_categorizados
+            self._cache_timestamp = time.time()
             
             logger.info(f"Serviços obtidos da API: {len(servicos_categorizados)}")
             return servicos_categorizados
             
         except APIError:
             # Se falhar, tentar usar cache mesmo expirado
-            servicos_cache = database.obter_servicos_cache()
-            if servicos_cache:
+            if self._cache_servicos:
                 logger.warning("Usando cache expirado devido a erro na API")
-                return servicos_cache
+                return self._cache_servicos
             raise
     
     def _categorizar_servicos(self, servicos: List[Dict]) -> List[Dict]:
         """
-        Categoriza os serviços baseado em palavras-chave.
+        Categoriza os serviços baseado no NOME do serviço.
         
-        Args:
-            servicos: Lista de serviços da API
-            
-        Returns:
-            Lista de serviços com categoria atualizada
+        A API BaratoInsta retorna todos os serviços em uma categoria genérica,
+        então precisamos detectar a categoria pelo nome.
         """
+        servicos_processados = []
+        
         for servico in servicos:
-            nome = servico.get('name', '').lower()
-            categoria = servico.get('category', '').lower()
+            nome = servico.get('name', '')
             
-            # Tentar identificar categoria por palavras-chave
-            categoria_identificada = 'outros'
+            # Detectar categoria pelo nome
+            categoria_detectada = _detectar_categoria_por_nome(nome)
             
-            for cat, keywords in config.KEYWORDS_CATEGORIAS.items():
-                if any(kw in nome or kw in categoria for kw in keywords):
-                    categoria_identificada = cat
-                    break
+            # Criar serviço processado com campos padronizados
+            servico_processado = {
+                'service_id': servico.get('service'),
+                'service': servico.get('service'),
+                'nome': nome,
+                'name': nome,
+                'tipo': servico.get('type', 'Default'),
+                'type': servico.get('type', 'Default'),
+                'rate': servico.get('rate', '0'),
+                'min': servico.get('min', 100),
+                'max': servico.get('max', 10000),
+                'categoria': categoria_detectada,
+                'category': categoria_detectada,
+                'categoria_original': servico.get('category', ''),
+                'refill': servico.get('refill', False),
+                'cancel': servico.get('cancel', False)
+            }
             
-            servico['category'] = categoria_identificada
-            
-        return servicos
+            servicos_processados.append(servico_processado)
+            logger.debug(f"Serviço '{nome[:40]}' -> categoria: {categoria_detectada}")
+        
+        return servicos_processados
     
     def criar_pedido(
         self, 
@@ -166,27 +213,6 @@ class BaratoInstaAPI:
     ) -> Dict[str, Any]:
         """
         Cria um novo pedido na API.
-        
-        Args:
-            service_id: ID do serviço
-            link: Link do perfil/post
-            quantidade: Quantidade desejada
-            
-        Returns:
-            Dict com dados do pedido criado (order_id)
-            
-        Raises:
-            APIError: Se houver erro na criação do pedido
-            
-        Example:
-            >>> api = BaratoInstaAPI()
-            >>> resultado = api.criar_pedido(
-            ...     service_id=1,
-            ...     link='https://instagram.com/usuario',
-            ...     quantidade=1000
-            ... )
-            >>> print(resultado)
-            {'order': 12345}
         """
         dados = {
             'action': 'add',
@@ -206,18 +232,6 @@ class BaratoInstaAPI:
     def consultar_status(self, order_id: int) -> Dict[str, Any]:
         """
         Consulta o status de um pedido na API.
-        
-        Args:
-            order_id: ID do pedido na API
-            
-        Returns:
-            Dict com status do pedido
-            
-        Example:
-            >>> api = BaratoInstaAPI()
-            >>> status = api.consultar_status(12345)
-            >>> print(status)
-            {'status': 'In progress', 'start_count': 1500, 'remains': 500}
         """
         dados = {
             'action': 'status',
@@ -228,36 +242,9 @@ class BaratoInstaAPI:
         logger.info(f"Status do pedido {order_id}: {resultado.get('status')}")
         return resultado
     
-    def consultar_status_multiplos(self, order_ids: List[int]) -> Dict[int, Dict]:
-        """
-        Consulta o status de múltiplos pedidos.
-        
-        Args:
-            order_ids: Lista de IDs de pedidos
-            
-        Returns:
-            Dict mapeando order_id para status
-        """
-        dados = {
-            'action': 'status',
-            'orders': ','.join(map(str, order_ids))
-        }
-        
-        resultado = self._fazer_requisicao(dados)
-        return resultado
-    
     def consultar_saldo(self) -> float:
         """
         Consulta o saldo disponível na conta da API.
-        
-        Returns:
-            float: Saldo disponível
-            
-        Example:
-            >>> api = BaratoInstaAPI()
-            >>> saldo = api.consultar_saldo()
-            >>> print(saldo)
-            150.50
         """
         dados = {'action': 'balance'}
         resultado = self._fazer_requisicao(dados)
@@ -269,34 +256,14 @@ class BaratoInstaAPI:
     def obter_servico(self, service_id: int) -> Optional[Dict[str, Any]]:
         """
         Obtém informações de um serviço específico.
-        
-        Args:
-            service_id: ID do serviço
-            
-        Returns:
-            Dict com dados do serviço ou None se não encontrado
         """
-        # Primeiro tentar no cache
-        servico = database.obter_servico_por_id(service_id)
-        if servico:
-            return servico
+        servicos = self.listar_servicos()
         
-        # Se não encontrar, atualizar cache e tentar novamente
-        self.listar_servicos(usar_cache=False)
-        return database.obter_servico_por_id(service_id)
-
-
-class APIError(Exception):
-    """
-    Exceção para erros da API.
-    
-    Attributes:
-        message: Mensagem de erro
-    """
-    
-    def __init__(self, message: str):
-        self.message = message
-        super().__init__(self.message)
+        for servico in servicos:
+            if servico.get('service_id') == service_id or servico.get('service') == service_id:
+                return servico
+        
+        return None
 
 
 # Instância global do cliente
@@ -337,11 +304,32 @@ def obter_categorias_disponiveis() -> List[str]:
     Obtém lista de categorias com serviços disponíveis.
     
     Returns:
-        Lista de categorias
+        Lista de categorias ordenadas
     """
     servicos = listar_servicos()
-    categorias = set(s.get('category', 'outros') for s in servicos)
-    return sorted(list(categorias))
+    
+    categorias = set()
+    for servico in servicos:
+        cat = servico.get('categoria', servico.get('category', 'outros'))
+        categorias.add(cat)
+    
+    # Ordenar com categorias principais primeiro
+    ordem = ['instagram', 'tiktok', 'youtube', 'twitter', 'facebook', 
+             'telegram', 'spotify', 'twitch', 'kwai', 'linkedin', 'outros']
+    
+    categorias_ordenadas = []
+    for cat in ordem:
+        if cat in categorias:
+            categorias_ordenadas.append(cat)
+    
+    # Adicionar qualquer categoria não prevista
+    for cat in categorias:
+        if cat not in categorias_ordenadas:
+            categorias_ordenadas.append(cat)
+    
+    logger.info(f"Categorias disponíveis: {categorias_ordenadas}")
+    
+    return categorias_ordenadas
 
 
 def obter_servicos_por_categoria(categoria: str) -> List[Dict[str, Any]]:
@@ -355,4 +343,12 @@ def obter_servicos_por_categoria(categoria: str) -> List[Dict[str, Any]]:
         Lista de serviços da categoria
     """
     servicos = listar_servicos()
-    return [s for s in servicos if s.get('category', '').lower() == categoria.lower()]
+    
+    filtrados = [
+        s for s in servicos 
+        if s.get('categoria', s.get('category', '')).lower() == categoria.lower()
+    ]
+    
+    logger.info(f"Categoria '{categoria}': {len(filtrados)} serviços encontrados")
+    
+    return filtrados
